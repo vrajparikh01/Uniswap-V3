@@ -1,0 +1,258 @@
+Uniswap V3 Notes:
+
+- Uniswap V3 introduces concentrated liquidity, allowing liquidity providers to allocate their capital within specific price ranges, enhancing capital efficiency.
+- If the price moves outside the specified range, the liquidity provider's position becomes inactive until the price returns to that range.
+- So, LP's have to actively manage their positions to ensure they remain within the desired price range. (Active Liquidity Management)
+- The protocol uses non-fungible tokens (NFTs) to represent liquidity positions, enabling more flexible and customizable liquidity provision.
+- Uniswap V3 features multiple fee tiers (0.05%, 0.30%, and 1.00%) to accommodate different types of traders and liquidity providers.
+- Uniswap V3 uses a more complex fee structure, allowing liquidity providers to choose different fee tiers based on their risk tolerance and market conditions.
+
+- Uniswap V2 tracks reserves of each token in a pair, while Uniswap V3 tracks liquidity and prices within specified ranges.
+- Uniswap V3 introduces the concept of "ticks" to represent discrete price points, allowing for more granular control over liquidity provision.
+- We calculate Reserves and price ranges from ticks and liquidity using the following formulas:
+  - Price = 1.0001 ^ tick
+  - Liquidity = sqrt(Reserves0 * Reserves1)
+  - Reserves0 = (Liquidity / sqrt(Pa)) - (Liquidity / sqrt(Pb))
+  - Reserves1 = (Liquidity * sqrt(Pb)) - (Liquidity * sqrt(Pa))
+  - Where Pa and Pb are the prices at the lower and upper ticks, respectively.
+
+Slot0:
+- Slot0 is a crucial data structure in Uniswap V3 that stores essential information about the current state of a liquidity pool.
+- Slot0 called because it is stored in the first storage slot of the pool contract which saves gas.
+- It contains the following key fields:
+  - sqrtPriceX96: The current price of the pool, represented as a square root value scaled by 2^96.
+  - tick: The current tick index, representing the logarithmic price level of the pool.
+  - observationIndex: The index of the last observation in the pool's observation array..
+  - feeProtocol: The protocol fee for the pool, represented as a percentage (e.g., 0.05%, 0.30%, or 1.00%).
+  - unlocked: A boolean flag whether the pool is currently locked or unlocked for trading.
+
+We can calculate the current price of the pool using the sqrtPriceX96 and tick values from Slot0:
+  - Price = (sqrtPriceX96 / 2^96) ^ 2
+  - Price = 1.0001 ^ tick
+If we want to calculate tick using sqrtPriceX96:
+  - tick = (2 * log(sqrtPriceX96 / 2^96)) / log(1.0001)
+
+Swap Fee Calculation:
+- Swap fee is charged on the input amount of the swap.
+- A is the amount of input token before fee.
+- fee is swap fee = A * feeTier
+- amountIn = A - fee <= max amount in
+- amountOut = amount of output token received after swap <= max amount out
+- For exact out, Since fee = AF, we have A = amountIn / (1 - F)
+- So, fee = (amountIn * F) / (1 - F)
+- For exact in, fee = amountIn * F / (1 + F) when amountIn is more than max amount in.
+- For exact in, fee = amountIn when amountIn is less than max amount in.
+
+Functions: 
+1. Swap:
+- It takes 5 input paramters:
+  - amountSpecified: The amount of tokens to be swapped, which can be positive (exact input) or negative (exact output).
+  - sqrtPriceLimitX96: The maximum or minimum price limit for the swap, represented as a square root value scaled by 2^96.
+  - liquidity: The current liquidity available in the pool for the swap.
+  - fee: The fee tier for the pool, represented as a percentage (e.g., 0.05%, 0.30%, or 1.00%).
+  - zeroForOne: A boolean flag indicating the direction of the swap (true for token0 to token1, false for token1 to token0).
+- Inside the loop, we perform tick by tick calculations until the entire amountSpecified is processed or the price limit is reached. 
+  - We calculate the next tick and its corresponding sqrt price.
+  - We determine the amount of tokens that can be swapped within the current tick range, considering the available liquidity and fees.
+  - We update the amountSpecified, sqrtPriceX96, liquidity, and tick values based on the swap calculations. And it is done via the function `computeSwapStep`.
+  - Updates balance of exact input or exact output tokens.
+  - Apply fees: The protocol fee is deducted from the input amount and added to the pool's fee growth and a portion goes to LP's (feeGrowthGlobal0X128 and feeGrowthGlobal1X128) 
+- After the while loop, we get the following output:
+  - amount0: The amount of token0 involved in the swap (positive for input, negative for output).
+  - amount1: The amount of token1 involved in the swap (positive for input, negative for output).
+  - sqrtPriceX96: The updated square root price after the swap.
+  - liquidity: The updated liquidity after the swap.
+  - tick: The updated tick index after the swap.
+- Token transfer via IUniswapV3SwapCallback interface.
+- Emit event and unlock the pool.
+
+For swap path calls:
+path = [token, fee, token, fee, token....]
+eg: DAI - 0.3% - WETH - 0.3% - USDC
+path = [DAI, 3000, WETH, 3000, USDC]
+
+2. exactInputSingle:
+- User will call this function in V3SwapRouter contract to swap exact input token for output token.
+- This will take 7 input parameters:
+  - tokenIn: The address of the input token.
+  - tokenOut: The address of the output token.
+  - fee: The fee tier for the pool, represented as a percentage (e.g., 0.05%, 0.30%, or 1.00%).
+  - recipient: The address that will receive the output tokens.
+  - amountIn: The exact amount of input tokens to be swapped.
+  - amountOutMinimum: The minimum amount of output tokens that must be received for the transaction to succeed.
+  - sqrtPriceLimitX96: The maximum or minimum price limit for the swap, represented as a square root value scaled by 2^96.
+- It will call exactInputInternal function which will call swap function in UniswapV3Pool contract.
+- Pool will transfer token out to user and then call UniswapV3SwapCallback interface to get token in from user.
+
+3. exactInput:
+- User will call this function in V3SwapRouter contract to swap exact input token for output token via multiple pools.
+- This will take 4 input parameters:
+  - path: The encoded path representing the sequence of token swaps and fee tiers.
+  - recipient: The address that will receive the output tokens.
+  - amountIn: The exact amount of input tokens to be swapped.
+  - amountOutMinimum: The minimum amount of output tokens that must be received for the transaction
+  to succeed.
+- It will call exactInputInternal function which will call swap function in UniswapV3Pool contract.
+- Pool will transfer token out to V3swapRouter(because here the recipient will be the router contract) and then call UniswapV3SwapCallback interface to get token in from user.
+- The path is decoded to extract the token addresses and fee tiers for each swap in the sequence.
+- The function iterates through the path, performing swaps in each pool until the final output token is obtained.
+- Finally, the output tokens are transferred to the specified recipient address.
+
+4. exactOutputSingle:
+- If you want to get some specific amnount of output token, you can call this function in V3SwapRouter contract.
+- This will take 7 input parameters just like exactInputSingle function.
+- It will call exactOutputInternal function which will call swap function in UniswapV3Pool contract.
+- Pool will transfer token out to user and then call UniswapV3SwapCallback interface to get token in from user.
+
+5. exactOutput:
+- If you want to get some specific amnount of output token via multiple pools, you can call this function in V3SwapRouter contract.
+- This will take 4 input parameters just like exactInput function.
+- It will call exactOutputInternal function which will call swap function in UniswapV3Pool contract.
+- Pool will transfer token out to user and then call UniswapV3SwapCallback interface to get token in from V3SwapRouter contract.
+- The path is decoded to extract the token addresses and fee tiers for each swap in the sequence.
+- The function iterates through the path in reverse order, performing swaps in each pool until the final output token is obtained.
+- Finally, the output tokens are transferred to the specified recipient address.
+
+create2:
+- address = keccak256(0xff, sender, salt, keccak256(creation bytecode))
+- deployer is the factory contract and salt is hash of tokenA, tokenB and fee.
+- We need to specify unique salt for each pool to get unique address.
+- When pool contract is deployed, initialize function with params are token0, token1, fee, factory address and tick spacing
+- It temporary stores initialize params in inside factory contract.
+
+6. createPool:
+- This function is called in UniswapV3Factory contract to create a new pool for a given pair of tokens and fee tier.
+- It takes 3 input parameters:
+  - tokenA: The address of the first token in the pair.
+  - tokenB: The address of the second token in the pair.  
+  - fee: The fee tier for the pool, represented as a percentage (e.g., 0.05%, 0.30%, or 1.00%).
+- The function first checks that the two tokens are different and that the fee tier is valid.
+- The pool contract is then deployed using the CREATE2 opcode, and the initialize function of the pool contract is called to set the initial state of the pool.
+- Finally, the function updates the factory's mapping of pools and emits a PoolCreated event.
+- The function returns the address of the newly created pool.
+
+7. getPool:
+- This function is called in UniswapV3Factory contract to get the address of an existing pool for a given pair of tokens and fee tier.
+- It takes 3 input parameters:
+  - tokenA: The address of the first token in the pair.
+  - tokenB: The address of the second token in the pair.  
+  - fee: The fee tier for the pool, represented as a percentage (e.g., 0.05%, 0.30%, or 1.00%).
+
+- Different Pools have different tick spacing
+- Reason: Pick between concentration of liquidity and the consumption of gas.
+- Lower tick space means liquidity is more concentrated but gas cost is higher (more ticks to cross).
+- Higher tick space means liquidity is less concentrated but gas cost is lower (less ticks to cross).
+- Pools with lower tick spacing are suitable for token pairs where price volatility is low and liquidity providers want to provide liquidity within a narrow price range.
+- eg: Stablecoin pairs like USDC/USDT or DAI/USDC.
+
+- Common way to add liquidity is to call NonfungiblePositionManager contract which will call mint function in UniswapV3Pool contract.
+- 4 functions: mint, increaseLiquidity, decreaseLiquidity, collect
+
+8. mint:
+- This function is called in UniswapV3Pool contract to add liquidity to a specific price range within the pool.
+- It takes 5 input parameters:
+  - recipient: The address that will receive the liquidity position NFT.
+  - tickLower: The lower tick index of the price range for the liquidity position.
+  - tickUpper: The upper tick index of the price range for the liquidity position.
+  - amount: The amount of liquidity to be added to the position.
+  - data: Additional data that can be passed to the callback function.
+- The function first checks that the specified tick range is valid and that the amount of liquidity is greater than zero.
+- It then calculates the amounts of token0 and token1 that need to be provided based on the current price and the specified tick range.
+- It calls _modifyPosition to update the position's liquidity and fee growth.
+- The function calls the IUniswapV3MintCallback interface to transfer the required tokens from the user to the pool.
+- Finally, the function updates the pool's state to reflect the new liquidity position and check the balance of the pool.
+- The function returns the amounts of token0 and token1 that were added to the pool.
+
+9. burn:
+- This function is called in UniswapV3Pool contract to remove liquidity from a specific price range within the pool.
+- It takes 3 input parameters:
+  - tickLower: The lower tick index of the price range for the liquidity position.
+  - tickUpper: The upper tick index of the price range for the liquidity position.
+  - amount: The amount of liquidity to be removed from the position.
+- The function first checks that the specified tick range is valid and that the amount of liquidity to be removed is greater than zero.
+- It then calls _modifyPosition to update the position's liquidity and fee growth.
+- Also, just by calling the function burn, the liquidity is decreased but the tokens are not sent to user. For that user has to call collect function.
+
+10. collect:
+- Used to collect the fees earned by swap and to actually withdraw the tokens from the pool.
+- This function is called in UniswapV3Pool contract
+- It takes 5 input parameters:
+  - recipient: The address that will receive the collected tokens.
+  - tickLower: The lower tick index of the price range for the liquidity position.
+  - tickUpper: The upper tick index of the price range for the liquidity position.
+  - amount0Requested: The maximum amount of token0 to be collected.
+  - amount1Requested: The maximum amount of token1 to be collected.
+- It then calculates the amounts of token0 and token1 that can be collected based on the position's liquidity and fee growth.
+- Finally, the function transfers the collected tokens to the specified recipient address
+
+11: mint:
+- This function is called in NonfungiblePositionManager contract to mint a new liquidity position NFT and add liquidity to a specific price range within the pool.
+- It takes a single input parameter, params, which is a struct containing the following fields:
+  - token0: The address of the first token in the pair.
+  - token1: The address of the second token in the pair.
+  - fee: The fee tier for the pool, represented as a percentage (e.g., 0.05%, 0.30%, or 1.00%).
+  - tickLower: The lower tick index of the price range for the liquidity position.
+  - tickUpper: The upper tick index of the price range for the liquidity position.
+  - amount0Desired: The desired amount of token0 to be added to the position.
+  - amount1Desired: The desired amount of token1 to be added to the position.
+  - amount0Min: The minimum amount of token0 that must be added to the position 
+  - amount1Min: The minimum amount of token1 that must be added to the position 
+  - recipient: The address that will receive the liquidity position NFT.
+  - deadline: The timestamp by which the transaction must be completed.
+- It returns tokenId, liquidity, amount0, amount1
+- The function first calls addLiquidity inside LiquidityManagement library to add liquidity to the specified price range within the pool.
+- addLiquidity function will first get the pool address and compute the liquidity amount based on the desired amounts of token0 and token1 and then calls mint fn in UniswapV3Pool contract.
+- It then mints a new NFT representing the liquidity position and assigns it to the specified recipient address.
+Next, it will calculate the PositionKey using keccak256 hash of owner address, tickLower and tickUpper which is used to get the position from mapping in contract.
+
+12: increaseLiquidity:
+- This function is called in NonfungiblePositionManager contract to increase the liquidity of an existing liquidity position NFT.
+- It takes a single input parameter, params, which is a struct containing the following fields:
+  - tokenId: The ID of the liquidity position NFT.
+  - amount0Desired: The desired amount of token0 to be added to the position.
+  - amount1Desired: The desired amount of token1 to be added to the position.
+  - amount0Min: The minimum amount of token0 that must be added to the position
+  - amount1Min: The minimum amount of token1 that must be added to the position
+  - deadline: The timestamp by which the transaction must be completed.
+- It returns liquidity, amount0, amount1
+- The function first retrieves the details of the liquidity position using the provided tokenId.
+- It then calls addLiquidity inside UniswapV3Pool contract to add liquidity to the specified price range within the pool.
+- Next it gets latestFeeGrowthGlobal0X128 and latestFeeGrowthGlobal1X128 from pool's positions via position key.
+- tokensOwed0 and tokensOwed1 (fees earned by swap) are also updated.
+- PositionKey is caluclated using keccak256 hash of owner address, tickLower and tickUpper which is used to get the position from mapping in contract.
+
+13: decreaseLiquidity:
+- This function is called in NonfungiblePositionManager contract to decrease the liquidity of an existing liquidity position NFT.
+- It takes a single input parameter, params, which is a struct containing the following fields:
+  - tokenId: The ID of the liquidity position NFT.
+  - liquidity: The amount of liquidity to be removed from the position. 
+  - amount0Min: The minimum amount of token0 that must be received for the transaction to succeed.
+  - amount1Min: The minimum amount of token1 that must be received for the transaction to succeed.
+  - deadline: The timestamp by which the transaction must be completed.
+- It returns amount0, amount1
+- The function first retrieves the details of the liquidity position using the provided tokenId.
+- It then calls burn function in UniswapV3Pool contract to remove liquidity from the specified price range within the pool.
+- Next it gets latestFeeGrowthGlobal0X128 and latestFeeGrowthGlobal1X128 from pool's positions via position key.
+
+14: collect:
+- This function is called in NonfungiblePositionManager contract to collect the fees earned by an existing liquidity position NFT.
+- It takes a single input parameter, params, which is a struct containing the following fields:
+  - tokenId: The ID of the liquidity position NFT.
+  - recipient: The address that will receive the collected tokens.
+  - amount0Max: The maximum amount of token0 to be collected.
+  - amount1Max: The maximum amount of token1 to be collected.
+- It returns amount0, amount1
+- The function first retrieves the details of the liquidity position using the provided tokenId.
+- It then calls collect function in UniswapV3Pool contract to collect the fees earned by the specified liquidity position.
+
+Tick Bitmap:
+- When liquidity is added, the two ticks tickLower and tickUpper which defines liquidity position are stored in tick bitmap.
+- During the swap, we need to find the next initialized tick from current tick by calling nextInitializedTickWithinOneWord function.
+- Tick bitmap is mapping of int16 to uint256.
+- To store tick in bitmap, it is broken into two parts:
+  - wordPosition (First 16 bits starting from left to right is stores as int16)
+  - bitPosition (Next 8 bits is stored as uint8)
+- wordPosition is used to get the uint256 value from mapping.
+- bitPosition is used to check whether the tick is initialized or not by shifting 1 to left by bitPosition and doing AND operation with uint256 value got from mapping.
+- eg: if bitPosition is 3, then 1 << 3 = 0000...1000
+- When we evaluate int16 of 16 bits, it turns out to be -784

@@ -2,10 +2,6 @@
 cache/
 out/
 
-# Docs
-docs/
-notes
-
 # Dotenv file
 .env
 .ipynb_checkpoints
